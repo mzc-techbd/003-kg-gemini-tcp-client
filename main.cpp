@@ -40,13 +40,13 @@ const char* SERVER_IP = "127.0.0.1"; // Replace with actual server IP if needed
 constexpr int PORT = 5001;             // Replace with actual server port
 constexpr int BUFFER_SIZE = 1024;
 constexpr int KEVENT_MAX_EVENTS = 64; // Max events to process per kevent call
-constexpr int INITIAL_RETRY_DELAY_MS = 1000; // Initial delay before first retry
+constexpr int INITIAL_RETRY_DELAY_MS = 2000; // Initial delay before first retry
 constexpr int MAX_RETRY_DELAY_MS = 30000;    // Maximum delay between retries
 const char* SENTENCE_FILE = "korean_sentences.txt";
 const char* RESULT_FILE = "latency_results.txt";
 constexpr int MAX_REQUESTS_BEFORE_SHUTDOWN = 10000; // Total requests to send before stopping
-constexpr auto KEVENT_TIMEOUT = std::chrono::milliseconds(100); // Timeout for kevent wait
-constexpr auto RETRY_CHECK_INTERVAL = std::chrono::milliseconds(100); // How often to check for retries
+constexpr auto KEVENT_TIMEOUT = std::chrono::milliseconds(500); // Timeout for kevent wait
+constexpr auto RETRY_CHECK_INTERVAL = std::chrono::milliseconds(500); // How often to check for retries
 constexpr auto STATUS_LOG_INTERVAL = std::chrono::seconds(5); // How often to log connection status
 
 // --- Client State ---
@@ -803,6 +803,15 @@ int main() {
         }
         // --- End Process Events ---
 
+        // --- Check for Shutdown Condition based on Initiated Requests ---
+        if (total_requests_initiated.load() >= MAX_REQUESTS_BEFORE_SHUTDOWN) {
+            if (running.load()) { // Check running flag again to avoid redundant logging if already stopping
+                console->info("[Main] Reached MAX_REQUESTS_BEFORE_SHUTDOWN ({}), initiating shutdown.", MAX_REQUESTS_BEFORE_SHUTDOWN);
+                running = false; // Signal shutdown
+            }
+        }
+        // --- End Check for Shutdown Condition ---
+
     } // End while(running.load())
     // --- End Main Event Loop ---
 
@@ -975,21 +984,38 @@ void handle_read(ClientState* state, int kq) {
 
             // Calculate latency if start time is valid
             double latency_ms = -1.0;
-            if (state->current_request_start_time != std::chrono::steady_clock::time_point::min()) {
+            // Calculate latency only if the client is connected and the start time is valid
+            if (state->status == ClientStatus::CONNECTED && state->current_request_start_time != std::chrono::steady_clock::time_point::min()) {
                  auto response_time = std::chrono::steady_clock::now();
                  std::chrono::duration<double, std::milli> latency = response_time - state->current_request_start_time;
                  latency_ms = latency.count();
-                 state->latencies_ms.push_back(latency_ms);
+                 // Only record latency if it's above a small threshold to avoid measurement artifacts
+                 constexpr double MIN_LATENCY_THRESHOLD_MS = 0.005;
+                 if (latency_ms >= MIN_LATENCY_THRESHOLD_MS) {
+                    state->latencies_ms.push_back(latency_ms);
+                 } else {
+                    // Optional: Log that a very low latency was ignored
+                    // if(console) console->trace("[Conn {}] Ignored latency below threshold: {:.6f} ms", client_idx, latency_ms);
+                 }
                  // Reset start time *only after* successfully processing the response
                  state->current_request_start_time = std::chrono::steady_clock::time_point::min();
                  processed_response = true; // Mark as processed
             } else {
                  // Received response without a corresponding start time. This might happen
                  // if the server sends unsolicited messages or if our timing logic has a flaw.
-                 if(console) console->warn("[Conn {}] Received response without a recorded start time. Ignoring for stats.", client_idx);
-            }
+                 // Log if start_time was valid but status wasn't CONNECTED (shouldn't happen with current logic, but good safety check)
+                 if (state->current_request_start_time != std::chrono::steady_clock::time_point::min()) {
+                     if(console) console->warn("[Conn {}] Ignoring latency calculation because status was not CONNECTED (Status: {}).", client_idx, static_cast<int>(state->status));
+                     // Reset start time here too, as we received a response but the state is wrong
+                     state->current_request_start_time = std::chrono::steady_clock::time_point::min();
+                 }
+                 // Else: Received response without a recorded start time (already handled by the primary 'if' condition)
+                 // else {
+                 //    if(console) console->warn("[Conn {}] Received response without a recorded start time. Ignoring for stats.", client_idx);
+                 // }
+             }
 
-            // --- Message Processed ---
+             // --- Message Processed ---
 
             // Remove processed message (including newline) from the beginning of the buffer
             buf.erase(buf.begin(), newline_iter + 1);

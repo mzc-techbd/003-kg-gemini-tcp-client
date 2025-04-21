@@ -1,0 +1,10 @@
+--- Test Results ---
+Test Completed: No (Interrupted)
+Target Requests: 10000
+Total Responses Received: 9984
+Total Latencies Measured: 9984
+Connections with Data: 200/200
+Average Latency: 685.425 ms
+Minimum Latency: 455.935 ms
+Maximum Latency: 6165.181 ms
+P99 Latency:     1543.191 ms
